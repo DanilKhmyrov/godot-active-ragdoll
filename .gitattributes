@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.gif binary
+/docs export-ignore
+/README.md export-ignore
+/.gitattributes export-ignore
