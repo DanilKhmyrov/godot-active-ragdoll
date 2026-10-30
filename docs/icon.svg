@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f3a4a"/>
+      <stop offset="1" stop-color="#1b212b"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="44" fill="url(#bg)"/>
+  <!-- ground -->
+  <line x1="40" y1="222" x2="216" y2="222" stroke="#3d4858" stroke-width="6" stroke-linecap="round"/>
+  <!-- ragdoll: limbs as capsules, joints as pins -->
+  <g stroke="#e9edf2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <!-- back leg -->
+    <polyline points="132,146 104,180 82,212" stroke-width="17"/>
+    <!-- back arm -->
+    <polyline points="146,94 118,70 108,40" stroke-width="13"/>
+    <!-- torso -->
+    <line x1="150" y1="92" x2="134" y2="146" stroke-width="30"/>
+    <!-- front leg -->
+    <polyline points="138,148 170,182 166,214" stroke-width="17"/>
+    <!-- front arm -->
+    <polyline points="154,96 192,84 214,106" stroke-width="13"/>
+  </g>
+  <circle cx="161" cy="66" r="19" fill="#e9edf2"/>
+  <g fill="#1b212b">
+    <circle cx="118" cy="70" r="3.5"/>
+    <circle cx="192" cy="84" r="3.5"/>
+    <circle cx="104" cy="180" r="4"/>
+    <circle cx="170" cy="182" r="4"/>
+    <circle cx="134" cy="146" r="4"/>
+  </g>
+  <!-- impact -->
+  <g fill="#ff4d4f">
+    <polygon points="140,112 147,100 150,113 163,108 154,118 166,126 151,125 152,139 143,128 132,135 136,122 124,118 137,116"/>
+  </g>
+  <g stroke="#ff4d4f" stroke-linecap="round" fill="none">
+    <line x1="30" y1="128" x2="112" y2="120" stroke-width="10"/>
+  </g>
+  <polygon points="128,118 104,106 108,133" fill="#ff4d4f"/>
+</svg>
