@@ -1,7 +1,8 @@
 extends SceneTree
 ## Frames for the README GIFs, recorded from the demo with Movie Maker:
-##   open -g -n -a Godot.app --args --path . --windowed --resolution 960x540 --position 10000,10000 \
-##     --fixed-fps 30 --write-movie OUT/f.png --script res://demo/tools/record_gif.gd      (env SCENE=reactions|getup)
+##   open -g -n --env SHOTS=OUT -a Godot.app --args --path . --windowed --resolution 960x540 --position 10000,10000 \
+##     --fixed-fps 30 --script res://demo/tools/record_gif.gd      (env SCENE=reactions|getup)
+## Frames are saved here after forcing a draw — Movie Maker on a window macOS does not redraw repeats old frames.
 ## then ffmpeg → GIF. reactions: a shot into an arm, a shove into the chest (stumbles, caught), a knock-down, a kick to
 ## a shin; getup: two bodies lying hurt — one on its back, one face down — getting up.
 
@@ -19,6 +20,18 @@ func _initialize() -> void:
 
 func _physics_process(delta: float) -> bool:
 	_time += delta
+	return false
+
+
+var _frame := 0
+
+
+func _process(_delta: float) -> bool:
+	var dir := OS.get_environment("SHOTS")
+	if dir != "" and _time > 0.0:
+		RenderingServer.force_draw(false)
+		root.get_texture().get_image().save_png("%s/f%05d.png" % [dir, _frame])
+		_frame += 1
 	return false
 
 
