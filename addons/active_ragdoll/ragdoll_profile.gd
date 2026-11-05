@@ -10,6 +10,8 @@ extends Resource
 ##   joint   — "" (free, the root), "cone" or "hinge".
 ##   limits  — cone: [swing°, twist°]; hinge: [from°, to°] around the bone's side axis.
 ##   group   — "legs", "spine", "head" or "arms": muscles of a group fade together (see ActiveRagdoll.collapse).
+##   hang    — optional, degrees: centre the joint's limits on the limb hanging this far out from straight down its
+##             parent (upper arms), instead of on the rest pose — a T-pose rest would leave a hanging arm out of range.
 ## Bone names follow Godot's SkeletonProfileHumanoid (retarget your model with a BoneMap and they match).
 
 @export var bones: Dictionary = {}
@@ -31,9 +33,9 @@ static func humanoid() -> RagdollProfile:
 		"Chest": {"to": "UpperChest", "radius": 0.12, "mass": 7.0, "joint": "cone", "limits": [10, 8], "group": "spine"},
 		"UpperChest": {"to": "Neck", "radius": 0.13, "mass": 9.0, "joint": "cone", "limits": [10, 8], "group": "spine"},
 		"Head": {"to": 0.2, "radius": 0.1, "mass": 5.0, "joint": "cone", "limits": [40, 45], "group": "head"},
-		"LeftUpperArm": {"to": "LeftLowerArm", "radius": 0.05, "mass": 2.5, "joint": "cone", "limits": [80, 40], "group": "arms"},
+		"LeftUpperArm": {"to": "LeftLowerArm", "radius": 0.05, "mass": 2.5, "joint": "cone", "limits": [95, 40], "hang": 40.0, "group": "arms"},
 		"LeftLowerArm": {"to": "LeftHand", "radius": 0.045, "mass": 1.6, "joint": "hinge", "limits": [0, 140], "group": "arms"},
-		"RightUpperArm": {"to": "RightLowerArm", "radius": 0.05, "mass": 2.5, "joint": "cone", "limits": [80, 40], "group": "arms"},
+		"RightUpperArm": {"to": "RightLowerArm", "radius": 0.05, "mass": 2.5, "joint": "cone", "limits": [95, 40], "hang": 40.0, "group": "arms"},
 		"RightLowerArm": {"to": "RightHand", "radius": 0.045, "mass": 1.6, "joint": "hinge", "limits": [0, 140], "group": "arms"},
 		"LeftUpperLeg": {"to": "LeftLowerLeg", "radius": 0.075, "mass": 9.0, "joint": "cone", "limits": [55, 20], "group": "legs"},
 		"LeftLowerLeg": {"to": "LeftFoot", "radius": 0.055, "mass": 4.0, "joint": "hinge", "limits": [0, 140], "group": "legs"},

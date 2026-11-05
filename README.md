@@ -12,11 +12,16 @@ with its strings cut, you get:
   weakens pins and muscles of the struck part — it really flies off, collides with the rest of the
   body and is pulled back; a heavy blow loosens the hips, the body sways, your locomotion reads
   `drift()` to step under it, and past `balance_max_drift` / `balance_max_drop` it emits
-  `balance_lost` — `release()` lets it fall carrying the motion it already had;
+  `balance_lost` — `release()` lets it fall carrying the motion it already had; a hard shove makes it **stumble** —
+  the body goes with the blow, `stumble_velocity()` tells your locomotion where to step, the arms flail; a few steps
+  catch it (`recovered`) or, too fast, it trips and falls the way it went;
 - **collapse** — on death the pose holds for a moment, then muscles give out by group:
   legs first (knees buckle), spine and head next, arms last;
-- **fall** — an alive body keeps some tone; falling forwards it **braces with its arms**,
-  falling backwards it **tucks its chin** and brings its arms in;
+- **fall** — an alive body protects itself: the arms **reach for the ground the way it falls** (in front, behind,
+  to the side — the far arm comes across), the head keeps off the ground (chin to chest backwards, face up forwards,
+  tilted away sideways), the back rounds falling backwards — a quick reflex (`brace_stiffness`);
+- **knock** — `knock(bone, impulse)`: the blow lands where it hit, the struck part leads and the body topples over
+  its feet instead of flying off as one block; a leg knocked out from under it gives way at once (no stepping);
 - **hit** — a blow without falling: only the upper body simulates while the legs keep
   animating, and muscles pull it back to the animation; it hands control back to the
   animation by itself, blending smoothly;
@@ -38,6 +43,19 @@ Works with Jolt and Godot Physics, Godot 4.4+ (uses `PhysicalBoneSimulator3D` an
 Copy the `addons/active_ragdoll` folder from this repository into your project's `addons/`.
 Enabling the plugin is optional: the classes are global (`class_name`).
 
+## Demo
+
+This repository is also a Godot project: open it (Godot 4.4+) and press F5. Four mannequins stand on a grey
+grid: you (WASD), one standing and one walking in puppet mode, one on plain animation (hit/stagger reactions).
+Click a body to use a tool on it — **Shot**, **Shove**, **Kill**, **Knock down** (1–4, power slider); Q throws a
+crate, C makes a body crawl, R stands everybody up, P toggles puppet mode, T slow motion, B shows the physical bodies.
+
+`demo/tools/demo_check.gd` runs every reaction headless and fails if a body lies or stands away from its physical
+bones: `godot --headless --path . --script res://demo/tools/demo_check.gd`.
+
+The mannequin and its animations are [Quaternius' Universal Animation Library](https://quaternius.com/packs/universalanimationlibrary.html)
+(CC0). The demo is not part of the addon download (`export-ignore`).
+
 ## Quick start
 
 ```gdscript
@@ -57,9 +75,9 @@ ragdoll.puppet_hit(&"LeftUpperArm", shot_dir * 12.0)     # the arm flies off and
 ragdoll.balance_lost.connect(func(): ragdoll.release("fall"))
 # killed: ragdoll.release("die", shot_dir * 0.5)
 
-# Knocked over, alive:
-ragdoll.start(push_velocity)
-ragdoll.fall()
+# Knocked over, alive — by a blow where it landed (the struck part goes first, the rest follows, the body topples
+# over its feet); works from puppet mode, plain animation or an already falling body:
+ragdoll.knock(&"UpperChest", push_dir * 150.0, "fall", velocity)
 
 # Shot in the arm, stays on his feet:
 ragdoll.hit(&"LeftUpperArm", shot_dir * 7.0)
@@ -114,17 +132,20 @@ the ragdoll started. Muscle tone per bone (`tone`, 0..1) is what behaviours anim
 | `puppet(on)`, `is_puppet()` | puppet mode |
 | `puppet_hit(bone, impulse, unpin, balance)` | weaken the struck part (and the hips' balance) and push it |
 | `drift()`, `drop()` | where the hips are vs the animation (step under them) |
+| `stumbling()`, `stumble_velocity()` | after a hard blow the body goes with it — move the character at this velocity (walk/run animation) so the feet step under it; `recovered` or `balance_lost` |
 | `release(how, dv)` | puppet → falling body ("die", "fall", "limp") |
+| `knock(bone, impulse, how, v)` | knocked over by a blow into `bone` (N·s) — topples from the hit point, any mode |
 | `stop()` | stop simulating (before a get-up animation) |
 | `is_running()`, `hitting()`, `hips_speed()` | state |
 | signal `settled` | the body has come to rest |
 | signals `balance_lost`, `recovered` | stagger outcome |
 
-Exports: `pin_rate`, `pin_weights`, `foot_pin`, `root_pin`, `recover_rate`, `balance_max_drift`, `balance_max_drop`, `hit_share`, `spine_brace`, `self_collision`, `frequency`, `damping_ratio`, `max_angular_step`, `collision_layer`, `collision_mask`,
-`settle_speed`, `hit_stiffness`, `hit_release`, `stagger_tone`, `stagger_max_lean`,
+Exports: `pin_rate`, `pin_weights`, `foot_pin`, `root_pin`, `recover_rate`, `balance_max_drift`, `balance_max_drop`, `balance_max_speed`, `stumble_min_speed`, `stumble_catch_speed`, `stumble_step_speed`, `stumble_brake`, `stumble_max_drift`, `stumble_time`, `hit_share`, `spine_brace`, `self_collision`, `frequency`, `damping_ratio`, `max_angular_step`, `collision_layer`, `collision_mask`,
+`settle_speed`, `hit_stiffness`, `hit_release`, `brace_stiffness`, `stagger_tone`, `stagger_max_lean`,
 `stagger_gain`, `stagger_time`, `stagger_power` (how much harder than physics a blow sways — 1 is physical).
 
-`RagdollProfile` (Resource): `bones` — `{bone name: {to, radius, mass, joint, limits, group}}`,
+`RagdollProfile` (Resource): `bones` — `{bone name: {to, radius, mass, joint, limits, group, hang}}` (`hang` — centre
+the limits on a limb hanging that many degrees out from straight down, not on the rest pose: upper arms of a T-pose rig),
 `knee_sign` / `elbow_sign` (hinge direction depends on the rig's bone axes), friction and damping.
 `RagdollProfile.humanoid()` — 15 bodies, 75 kg, for SkeletonProfileHumanoid.
 

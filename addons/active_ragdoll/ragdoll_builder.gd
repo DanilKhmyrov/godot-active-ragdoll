@@ -83,6 +83,8 @@ static func build(skeleton: Skeleton3D, profile: RagdollProfile, sim_name := "Ra
 		pb.set_meta(&"ragdoll_group", spec.get("group", ""))
 		pb.set_meta(&"ragdoll_length", length)
 		pb.set_meta(&"ragdoll_radius", radius)
+		if spec.has("hang"):
+			pb.set_meta(&"ragdoll_hang", float(spec["hang"]))
 		sim.add_child(pb)
 		r.bones[bone_name] = pb
 	return r

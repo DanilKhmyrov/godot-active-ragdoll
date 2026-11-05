@@ -36,9 +36,10 @@ extends Node
 ## Groups ("legs", "spine", "head", "arms") come from the profile (or meta "ragdoll_group" on the bodies).
 
 signal settled
-## stagger(): the feet could not catch the torso — knock the body over (start() + fall()).
+## stagger(): the feet could not catch the torso — knock the body over (start() + fall()). Puppet: the body went too
+## far off its feet (or stumbled too long) — release() it.
 signal balance_lost
-## stagger(): the torso is back over the feet — the body is animated again.
+## stagger() / puppet stumbling: the feet caught the body.
 signal recovered
 
 ## Muscle natural frequency at full tone, rad/s: higher — stiffer (a 1.75 m human holds a pose at ~10–16).
@@ -69,6 +70,8 @@ signal recovered
 @export var stagger_gain := 5.5
 ## stagger(): longest the feet may try, s.
 @export var stagger_time := 1.6
+## fall(): how much faster than usual the protecting muscles (arms reaching for the ground, the neck) move — a reflex.
+@export var brace_stiffness := 2.5
 ## Puppet: how fast pins pull a body back to its animated place, 1/s per metre of error.
 @export var pin_rate := 14.0
 ## Puppet: pin weight per group (0 — free, 1 — follows the animation exactly).
@@ -81,9 +84,23 @@ signal recovered
 @export var recover_rate := 0.7
 ## Puppet: centre of mass this far (m, horizontal) from where the animation has it — balance is lost.
 @export var balance_max_drift := 0.22
-## Puppet: a blow that would move the whole body faster than this (impulse / mass, m/s, horizontal) — it cannot stop
-## and goes down after a short stagger.
-@export var balance_max_speed := 1.3
+## Puppet: a blow that would move the whole body faster than this (impulse / mass, m/s, horizontal) cannot be caught
+## by stepping — the body goes down after a moment. Slower ones make it stumble.
+@export var balance_max_speed := 2.6
+## Puppet: a blow moving the whole body at least this fast (m/s, horizontal) makes it stumble — the hips go with the
+## blow and the feet have to step under them (stumble_velocity()); slower ones the pins absorb on the spot.
+@export var stumble_min_speed := 0.45
+## Puppet, stumbling: fastest the feet can step, m/s.
+@export var stumble_step_speed := 2.8
+## Puppet, stumbling: a body sent off faster than this (m/s) is caught by the steps; faster (up to balance_max_speed)
+## it stumbles a few steps and trips — sooner the faster it goes.
+@export var stumble_catch_speed := 1.8
+## Puppet, stumbling: how hard the stepping feet brake the body, m/s² (at full support) — a lower value, longer stumbles.
+@export var stumble_brake := 1.6
+## Puppet, stumbling: the centre of mass this far (m, horizontal) from the feet's animated place — down it goes.
+@export var stumble_max_drift := 0.5
+## Puppet, stumbling: longest the feet may try, s.
+@export var stumble_time := 2.5
 ## Puppet: hips this far below the animation — the legs gave way, balance is lost.
 @export var balance_max_drop := 0.3
 ## Puppet: share of a blow's impulse the struck body takes; the rest goes down its chain to the hips (by mass).
@@ -146,6 +163,16 @@ var _drift := Vector3.ZERO
 var _drift_prev := Vector3.INF
 var _com_speed := 0.0
 var _fall_at := -1.0
+var _stumble := false
+var _stumble_t := 0.0
+var _support_h := 1.0       # stumbling: how well the feet are under the body, 0..1 — the hips' horizontal pin
+var _step_v := Vector3.ZERO # stumbling: where the feet should go, m/s (world, horizontal)
+var _body_v := Vector3.ZERO # stumbling: how fast the body goes (world, horizontal) — the blow, braked by the steps
+var _trip_at := -1.0        # stumbling: when a too fast body trips over its feet
+var _flail_k := 0.0         # stumbling: how hard the arms flail, 0..1 — rises with the blow, fades slower than it
+var _com_prev := Vector3.INF
+var _com_v := Vector3.ZERO  # centre of mass velocity, physical (world)
+var _caught := 0.0
 var _drop := 0.0
 var _pose_now := {}          # bone name → Transform3D
 var _pose_prev := {}
@@ -364,6 +391,7 @@ func start(v := Vector3.ZERO, spin := Vector3.ZERO, exceptions: Array = [], exce
 		pb.collision_layer = collision_layer
 		pb.collision_mask = collision_mask | (collision_layer if self_collision else 0)
 		pb.gravity_scale = 1.0
+	_anchor_joints()
 	simulator.active = true
 	simulator.influence = 1.0
 	simulator.physical_bones_start_simulation()
@@ -465,6 +493,7 @@ func hit(bone_name: StringName, impulse: Vector3, recover_tone := 0.75, max_time
 			# a standing body holds its torso against its weight anyway; toppling is modelled separately (stagger)
 			pb.gravity_scale = 0.0
 			tone[String(n)] = recover_tone
+		_anchor_joints()
 		simulator.active = true
 		simulator.influence = 1.0
 		simulator.physical_bones_start_simulation(upper)
@@ -570,6 +599,9 @@ func puppet(on: bool, keep_physics := false) -> void:
 	_drift_prev = Vector3.INF
 	_com_speed = 0.0
 	_fall_at = -1.0
+	_stumble = false
+	_support_h = 1.0
+	_com_prev = Vector3.INF
 	for n: String in bones:
 		tone[n] = 1.0
 		_pin_mul[n] = 1.0
@@ -604,19 +636,34 @@ func puppet_hit(bone_name: StringName, impulse: Vector3, unpin := 0.95, balance 
 	var b := String(bone_name)
 	if not bones.has(b):
 		b = _root_name()
+	var g: String = _group[b]
+	# a blow into the trunk or the head: the trunk braces (below) — else a limp spine folds 90° over still legs. A blow
+	# into a limb leaves the trunk free to give: an arm pulled by a hit drags the shoulder and turns the chest.
+	var trunk := g in ["spine", "head"]
+	# the blow loosens the chain it travels down too, less at every joint (parent 0.6, then 0.36…): the shoulder of a
+	# struck arm gives, the chest turns, the hips barely notice — instead of a rigid trunk under a flailing arm
+	var up := {}
+	var a: String = _parent[b]
+	var fade := 0.6
+	while a != "":
+		up[a] = fade
+		fade *= 0.6
+		a = _parent[a]
+	var struck_root := b == _root_name()
 	for n: String in bones:
 		var k := 0.0
-		if n == b or _descends(n, b):
+		if n == b or (_descends(n, b) and not struck_root):
 			k = unpin
-		elif _parent[b] == n:
-			k = unpin * 0.6
+		elif struck_root and _parent[n] == b:
+			# everything hangs from the root: a blow into the hips loosens what is right on them, not the whole body
+			k = unpin * 0.4
+		elif up.has(n) and n != _root_name():
+			k = unpin * float(up[n])
 		if k > 0.0:
 			_pin_mul[n] = minf(_pin_mul[n], 1.0 - k)
-			if n == b or _descends(n, b):
+			if n == b or (_descends(n, b) and not struck_root):
 				_hold[n] = maxf(float(_hold.get(n, 0.0)), _t + hold)
-			# the trunk braces: spine muscles never go fully slack from a blow (a limp spine folds 90° over still legs)
-			_tone_mul[n] = minf(_tone_mul[n], maxf(1.0 - k * 0.85, spine_brace if _group[n] == "spine" else 0.0))
-	var g: String = _group[b]
+			_tone_mul[n] = minf(_tone_mul[n], maxf(1.0 - k * 0.85, spine_brace if trunk and _group[n] == "spine" else 0.0))
 	var bal := balance if balance >= 0.0 else {"legs": 0.85, "spine": 0.7, "head": 0.3, "arms": 0.1}.get(g, 0.3)
 	var root := _root_name()
 	_pin_mul[root] = minf(_pin_mul[root], 1.0 - bal)
@@ -635,35 +682,97 @@ func puppet_hit(bone_name: StringName, impulse: Vector3, unpin := 0.95, balance 
 			if _group[n] == "legs" and n != b and not _descends(n, b):
 				_tone_mul[n] = minf(_tone_mul[n], 0.45)
 				_hold[n] = maxf(float(_hold.get(n, 0.0)), _t + hold * 0.8)
-	# the trunk braces: spine pins keep `spine_brace` — the spine muscles alone cannot hold the torso up against gravity
-	# (pins carry it), a torso without them folds over the hips. A leg blow is different: the body is meant to sink.
-	if g != "legs":
+	# the trunk braces: spine pins (held to the hips) keep `spine_brace` — the spine muscles alone cannot hold the torso
+	# up against gravity, a torso without them folds over the hips. A leg blow is different: the body is meant to sink.
+	if trunk:
 		for n: String in bones:
 			if _group[n] == "spine" and n != root:
 				_pin_mul[n] = maxf(_pin_mul[n], spine_brace)
-	# a velocity change, not apply_central_impulse: impulses given to a PhysicalBone3D outside the physics step get lost
-	# the struck body takes `hit_share` of the impulse, the rest goes down the chain to the root by mass — the joints
-	# would pass it on anyway, but a whole blow in one light body in one tick tears through the joint limits
-	var chain: Array[PhysicalBone3D] = []
-	var c := b
-	while c != "" and bones.has(c):
-		chain.append(bones[c] as PhysicalBone3D)
-		c = _parent.get(c, "")
-	var rest_mass := 0.0
-	for i in range(1, chain.size()):
-		rest_mass += chain[i].mass
-	var share := hit_share if rest_mass > 0.0 else 1.0
-	chain[0].linear_velocity += impulse * share / maxf(chain[0].mass, 0.1)
-	for i in range(1, chain.size()):
-		chain[i].linear_velocity += impulse * (1.0 - share) / rest_mass
+	_blow(b, impulse, hit_share)
 	_last_hit = _t
 	# the blow would move the whole body faster than it can stop (balance_max_speed): it staggers a moment and goes
 	# down. (Pins eat the momentum within a few ticks, so this is decided at the blow, not measured afterwards.)
 	var total := 0.0
 	for pb: PhysicalBone3D in bones.values():
 		total += pb.mass
-	if bal > 0.5 and Vector2(impulse.x, impulse.z).length() / maxf(total, 1.0) > balance_max_speed and _fall_at < 0.0:
+	var speed := Vector2(impulse.x, impulse.z).length() / maxf(total, 1.0)
+	if bal > 0.5 and speed > balance_max_speed and _fall_at < 0.0:
 		_fall_at = _t + 0.25
+	elif g == "legs" and bal > 0.5 and speed > stumble_min_speed:
+		# a leg knocked out from under the body cannot step — no stumbling: the body sags onto it and goes down
+		_stumble = false
+		_fall_at = _t + 0.2 if _fall_at < 0.0 else minf(_fall_at, _t + 0.2)
+	elif bal > 0.5 and speed > stumble_min_speed:
+		# the body goes with the blow and the feet have to catch it (see _stumble_tick)
+		if not _stumble:
+			_stumble_t = 0.0
+			_caught = 0.0
+			_body_v = Vector3.ZERO
+			_trip_at = -1.0
+			_flail_k = 0.0
+		_stumble = true
+		_support_h = 0.0
+		_body_v += Vector3(impulse.x, 0.0, impulse.z) / maxf(total, 1.0)
+		var over := inverse_lerp(stumble_catch_speed, balance_max_speed, _body_v.length())
+		if over > 0.0:
+			# too fast to be caught: a few steps, then the feet tangle
+			var trip := _stumble_t + lerpf(1.0, 0.35, clampf(over, 0.0, 1.0))
+			_trip_at = trip if _trip_at < 0.0 else minf(_trip_at, trip)
+
+
+## A blow into bone `b` (impulse, N·s, world) as velocity changes — not apply_central_impulse: impulses given to a
+## PhysicalBone3D outside the physics step get lost. The struck body takes `share` of it (< 0 — its share of the
+## chain's mass), the rest goes down the chain to the root by mass — the joints would pass it on anyway, but a whole
+## blow in one light body in one tick tears through the joint limits. Nothing reaches the bodies off the chain (the
+## legs under a struck chest): they only follow through the joints — the body topples from the blow instead of
+## flying off as one block.
+func _blow(b: String, impulse: Vector3, share := -1.0) -> void:
+	var chain: Array[PhysicalBone3D] = []
+	var c := b
+	while c != "" and bones.has(c):
+		chain.append(bones[c] as PhysicalBone3D)
+		c = _parent.get(c, "")
+	# by mass, less at every joint further from the blow (0.6 per joint): the struck part leads, the hips under a
+	# struck chest mostly get dragged by the spine — the body bends and topples instead of sliding off on its feet
+	var weights: Array[float] = []
+	var rest := 0.0
+	for i in chain.size():
+		weights.append(chain[i].mass * pow(0.6, i))
+		if i > 0:
+			rest += weights[i]
+	if rest <= 0.0:
+		share = 1.0
+	elif share < 0.0:
+		share = weights[0] / (weights[0] + rest)
+	chain[0].linear_velocity += impulse * share / maxf(chain[0].mass, 0.1)
+	for i in range(1, chain.size()):
+		# each body takes its part where the blow reaches it — at the joint of the body below it in the chain: an arm
+		# pulled sideways turns the chest about the spine, a push into the chest rocks the hips, not only shifts them
+		var j := impulse * (1.0 - share) * weights[i] / rest
+		var at := (chain[i - 1].global_transform * chain[i - 1].joint_offset).origin
+		chain[i].linear_velocity += j / chain[i].mass
+		var inertia := float(_own_inertia[String(chain[i].get("bone_name"))])
+		chain[i].angular_velocity += ((at - chain[i].global_position).cross(j) / inertia).limit_length(12.0)
+
+
+## Knocked over by a blow into `bone_name` (impulse, N·s, world): from puppet mode, from plain animation (the ragdoll
+## starts with the character's velocity `v`) or an already falling body. The blow lands where it hit — the struck part
+## goes first and the rest follows through the joints; `how` — "fall" (alive: braces), "die" or "limp".
+func knock(bone_name: StringName, impulse: Vector3, how := "fall", v := Vector3.ZERO) -> void:
+	var b := String(bone_name) if bones.has(String(bone_name)) else _root_name()
+	if _puppet:
+		release(how)
+	elif not _running:
+		start(v)
+		match how:
+			"die":
+				collapse()
+			"fall":
+				fall()
+			_:
+				for n: String in bones:
+					tone[n] = 0.0
+	_blow(b, impulse)
 
 
 ## Puppet: where the body is compared with the animation — horizontal drift of the centre of mass (world, m) and drop
@@ -682,6 +791,9 @@ func release(how := "fall", dv := Vector3.ZERO) -> void:
 	if not _puppet:
 		return
 	_puppet = false
+	# a stumbling body that lost it trips over its feet: they catch, the rest goes on the way it went
+	var trip_v := _body_v if _stumble else Vector3.ZERO
+	_stumble = false
 	_snapshot.clear()
 	if _target_mod:
 		for n: String in bones:
@@ -694,6 +806,13 @@ func release(how := "fall", dv := Vector3.ZERO) -> void:
 	_fades.clear()
 	for pb: PhysicalBone3D in bones.values():
 		pb.linear_velocity += dv
+	if trip_v.length() > 0.05:
+		for n: String in bones:
+			var pb := bones[n] as PhysicalBone3D
+			if "Foot" in n or "Toes" in n:
+				pb.linear_velocity = Vector3(0.0, pb.linear_velocity.y, 0.0)
+			elif _group[n] != "legs":
+				pb.linear_velocity += trip_v * 0.8
 	match how:
 		"die":
 			collapse()
@@ -717,6 +836,11 @@ func _puppet_tick(delta: float) -> void:
 		_pin_mul[n] = minf(float(_pin_mul[n]) + recover_rate * delta, 1.0)
 		_tone_mul[n] = minf(float(_tone_mul[n]) + recover_rate * delta, 1.0)
 		tone[n] = float(_tone_mul[n])
+	if _stumble:
+		# a stumbling body throws its arms out whatever hit it (a limp arm would hang)
+		for n: String in bones:
+			if _group[n] == "arms":
+				tone[n] = maxf(float(tone[n]), 0.8 * _flail())
 	if _target_mod == null or _target_mod.targets.is_empty():
 		return
 	# the character jumped (teleport, respawn, seat): move the whole body there at once instead of dragging it
@@ -737,28 +861,57 @@ func _puppet_tick(delta: float) -> void:
 	var com_phys := Vector3.ZERO
 	var com_anim := Vector3.ZERO
 	var mass := 0.0
+	# the upper body (spine, head, arms) is pinned to its animated place as carried by the physical hips, not to its
+	# place in the world: a pushed torso takes the hips along (and the hips the torso) instead of staying put while the
+	# hips move under it — only the hips and the legs hold the body in the world (balance)
+	# (only where the hips went, not how they turned: the muscles already turn the torso with the hips, and carrying the
+	# hips' tilt too would swing the head by every degree of it)
+	var carry := Transform3D(Basis.IDENTITY, rpb.global_position - rt.origin)
+	var gravity: Vector3 = ProjectSettings.get_setting("physics/3d/default_gravity", 9.8) \
+		* ProjectSettings.get_setting("physics/3d/default_gravity_vector", Vector3.DOWN)
 	for n: String in bones:
 		if not _target_mod.targets.has(n):
 			continue
 		var pb := bones[n] as PhysicalBone3D
-		var tw: Transform3D = g * (_target_mod.targets[n] as Transform3D) * pb.body_offset
+		var anim_w: Transform3D = g * (_target_mod.targets[n] as Transform3D) * pb.body_offset
+		var tw := anim_w if n == root or _group[n] == "legs" else carry * anim_w
 		var prev: Transform3D = _prev_target_w.get(n, tw)
 		_prev_target_w[n] = tw
 		var base: float = root_pin if n == root else (foot_pin if "Foot" in n or "Toes" in n else float(pin_weights.get(_group[n], 0.3)))
 		base = maxf(base, float(pin_override.get(n, 0.0)))
+		if _stumble and _group[n] == "arms":
+			base *= 1.0 - 0.9 * _flail()       # the arms are busy catching the balance (_stumble_arm_targets)
 		var w := clampf(base * float(_pin_mul[n]) * strength, 0.0, 1.0)
 		com_phys += pb.global_position * pb.mass
-		com_anim += tw.origin * pb.mass
+		com_anim += anim_w.origin * pb.mass
 		mass += pb.mass
 		if n == root:
 			_drop = -(pb.global_position - tw.origin).y
+		# muscles carry the body's weight while its pin is whole (else the pins only hold it with a sag — the hips carry
+		# the upper body); a blow weakens the pin and gives the weight back — a struck body sags. Flailing arms are
+		# held up by their own muscles.
+		var carried_k := clampf(float(_pin_mul[n]) * strength, 0.0, 1.0)
+		if _stumble and _group[n] == "arms":
+			carried_k = maxf(carried_k, _flail())
+		var hold_up := gravity * pb.gravity_scale * delta * carried_k
 		if w <= 0.001:
+			pb.linear_velocity -= hold_up
 			continue
 		var v_anim := (tw.origin - prev.origin) / maxf(delta, 1e-4)
 		if v_anim.length() > 15.0:
 			v_anim = Vector3.ZERO           # teleport
 		var want_v := v_anim + (tw.origin - pb.global_position) * pin_rate
-		pb.linear_velocity = pb.linear_velocity.lerp(want_v, w)
+		if n == root and _stumble:
+			# stumbling: the hips keep their height (the legs carry them) and go as the blow sent them, braked by the
+			# steps (_stumble_tick) — the feet chase them
+			var v := pb.linear_velocity
+			var wv := maxf(w, root_pin * 0.8 * strength)
+			var h := Vector2(v.x, v.z).lerp(Vector2(_body_v.x, _body_v.z), 0.5)
+			pb.linear_velocity = Vector3(h.x, lerpf(v.y, want_v.y, wv), h.y)
+		else:
+			pb.linear_velocity = pb.linear_velocity.lerp(want_v, w)
+		# after the pin, or the pin would eat part of it
+		pb.linear_velocity -= hold_up
 		if n == root:
 			var q := (tw.basis.orthonormalized() * pb.global_basis.orthonormalized().inverse()).get_rotation_quaternion()
 			if q.w < 0.0:
@@ -771,10 +924,52 @@ func _puppet_tick(delta: float) -> void:
 	if mass > 0.0:
 		var d := (com_phys - com_anim) / mass
 		_drift = Vector3(d.x, 0.0, d.z)
+		var com := com_phys / mass
+		if _com_prev != Vector3.INF:
+			_com_v = _com_v.lerp((com - _com_prev) / maxf(delta, 1e-4), 1.0 - exp(-20.0 * delta))
+		_com_prev = com
 	var knocked := _fall_at >= 0.0 and _t >= _fall_at
-	if _drift.length() > balance_max_drift or _drop > balance_max_drop or knocked:
+	if _stumble:
+		knocked = knocked or _stumble_tick(delta)
+	if (_drift.length() > balance_max_drift and not _stumble) or _drop > balance_max_drop or knocked:
 		_fall_at = -1.0
+		_stumble = false
 		balance_lost.emit()
+
+
+## Stumbling (puppet): the feet step to catch the body a blow sent off. The feet have to go as fast as the body
+## and make up how far behind it they are: stumble_velocity() is how fast the character has to move (its walk/run
+## animation makes the steps, the pinned feet follow them). Feet under the body hold the hips again (support) and every
+## step brakes it (stumble_brake) — a few steps and it stands. Returns true when it cannot be caught: the body got
+## too far off its feet or the feet tried too long.
+func _stumble_tick(delta: float) -> bool:
+	_stumble_t += delta
+	# the feet go as fast as the body and make up how far behind it they are
+	_step_v = (_body_v + _drift * 4.0).limit_length(stumble_step_speed)
+	_support_h = clampf(1.0 - _drift.length() / 0.3, 0.0, 1.0)
+	# feet under the body brake it
+	_body_v = _body_v.move_toward(Vector3.ZERO, stumble_brake * _support_h * delta)
+	# the arms go up with the blow and come down only once the body slows
+	_flail_k = maxf(_flail_k - delta * 0.9, clampf(_body_v.length() / 0.9, 0.0, 1.0))
+	if _drift.length() > stumble_max_drift or _stumble_t > stumble_time or (_trip_at >= 0.0 and _stumble_t >= _trip_at):
+		return true
+	_caught = _caught + delta if _body_v.length() < 0.15 and _drift.length() < 0.1 else 0.0
+	if _caught > 0.2:
+		_stumble = false
+		_step_v = Vector3.ZERO
+		_support_h = 1.0
+		recovered.emit()
+	return false
+
+
+## Puppet: stumbling after a blow — move the character at stumble_velocity() meanwhile.
+func stumbling() -> bool:
+	return _stumble and _puppet
+
+
+## Puppet, stumbling: where to step — horizontal velocity (world, m/s) that brings the feet under the falling body.
+func stumble_velocity() -> Vector3:
+	return _step_v if stumbling() else Vector3.ZERO
 
 
 ## Stop simulating (the caller takes the body back, e.g. a get-up animation).
@@ -877,6 +1072,51 @@ func _stagger_tick(delta: float) -> void:
 		recovered.emit()
 
 
+## Joints that cross bones without a body (upper arm ← shoulder ← upper chest, head ← neck ← upper chest) are built
+## by PhysicalBone3D once, from the pose the skeleton had then (usually the rest pose — a T-pose shoulder). The
+## animation moves those in-between bones (shoulders drop 30° from a T-pose), so the physical arm would hang 10–20 cm
+## from the one on screen: hits land beside the arm, a lying body's arms sink into the floor. Before simulating,
+## re-anchor such joints where the in-between bones put the child now; the limits stay centred on the rest pose of
+## the physical bones themselves.
+func _anchor_joints() -> void:
+	for n: String in bones:
+		var p: String = _parent[n]
+		if p == "":
+			continue
+		var i: int = _idx[n]
+		var pb := bones[n] as PhysicalBone3D
+		var ppb := bones[p] as PhysicalBone3D
+		var hang: float = pb.get_meta(&"ragdoll_hang", -1.0)
+		var chain := Transform3D.IDENTITY          # parent bone → this bone, animated in-between bones, rest ends
+		var b := skeleton.get_bone_parent(i)
+		if b == _idx[p] and hang < 0.0:
+			continue
+		while b >= 0 and b != _idx[p]:
+			chain = skeleton.get_bone_pose(b) * chain
+			b = skeleton.get_bone_parent(b)
+		chain = chain * skeleton.get_bone_rest(i)
+		if hang >= 0.0:
+			# limits centred on a hanging limb, not on the rest pose: a T-pose rest would centre the shoulder's cone on
+			# an arm held out sideways — the arm could neither hang (90° off) nor reach forward, the joint pushing it up
+			var r := chain.basis.y.normalized()
+			var a := r.angle_to(Vector3.DOWN)       # the parent's −Y: down along the spine
+			if a > deg_to_rad(hang) and Vector3.DOWN.cross(r).length() > 1e-4:
+				var axis := Vector3.DOWN.cross(r).normalized()
+				chain.basis = Basis(Quaternion(r, Vector3.DOWN.rotated(axis, deg_to_rad(hang)))) * chain.basis
+		# PhysicalBone3D builds its joint from the two bodies' transforms when the joint type is set: place this body
+		# where the chain puts it relative to the parent body, rebuild, restore the limits
+		pb.global_transform = ppb.global_transform * ppb.body_offset.affine_inverse() * chain * pb.body_offset
+		var keep := {}
+		for prop in pb.get_property_list():
+			if String(prop.name).begins_with("joint_constraints/"):
+				keep[prop.name] = pb.get(prop.name)
+		var jt := pb.joint_type
+		pb.joint_type = PhysicalBone3D.JOINT_TYPE_NONE
+		pb.joint_type = jt
+		for k: StringName in keep:
+			pb.set(k, keep[k])
+
+
 func _snapshot_pose() -> void:
 	_snapshot.clear()
 	for i in skeleton.get_bone_count():
@@ -899,7 +1139,7 @@ func _physics_process(delta: float) -> void:
 		_puppet_tick(delta)
 	else:
 		_update_tone()
-	var overrides := _brace_targets() if _brace > 0.0 else {}
+	var overrides := _brace_targets() if _brace > 0.0 else (_stumble_arm_targets() if stumbling() else {})
 	var err_sum := 0.0
 	var count := 0
 	var sk_basis := skeleton.global_basis.orthonormalized()
@@ -934,6 +1174,8 @@ func _physics_process(delta: float) -> void:
 		# velocity towards "parent's + correction of the pose error"; the parent gets the opposite change scaled by
 		# inertia (no swimming: a ragdoll cannot push itself through the air).
 		var rate := frequency * s * (hit_stiffness if not _partial.is_empty() and not _stagger else 1.0)   # rad/s per rad
+		if overrides.has(n) and _brace > 0.0:
+			rate *= lerpf(1.0, brace_stiffness, _brace)   # a protective reflex is faster than holding a pose
 		var ppb := bones[p] as PhysicalBone3D
 		var parent_sim := _partial.is_empty() or _partial.has(StringName(p))
 		var parent_w := ppb.angular_velocity if parent_sim else Vector3.ZERO
@@ -974,12 +1216,15 @@ func _update_tone() -> void:
 			if _group[n] == g:
 				tone[n] = v
 	if _brace > 0.0:
-		var landed := _t > 0.35 and absf(_root_velocity().y) < 0.4
+		var landed := _t > 0.35 and absf(_root_velocity().y) < 0.4 and _root_velocity().length() < 1.2
 		if _t > _brace_until or landed:
 			_brace = maxf(_brace - get_physics_process_delta_time() * 3.0, 0.0)
+		# the protecting muscles hold until the body is down: arms and neck firm, the back keeps its curl
 		for n: String in bones:
-			if _group[n] == "arms":
+			if _group[n] == "arms" or _group[n] == "head":
 				tone[n] = maxf(tone[n], 0.9 * _brace)
+			elif _group[n] == "spine":
+				tone[n] = maxf(tone[n], 0.55 * _brace)
 
 
 func _root_velocity() -> Vector3:
@@ -1005,39 +1250,98 @@ func _target(n: String) -> Transform3D:
 	return _snapshot[i]
 
 
-## Bracing: falling forwards — upper arms point at the ground ahead (forearms nearly straight); backwards — chin
-## tucked, arms come in front of the chest. World rotations of the bones that override the pose target.
+## Stumbling: how hard the arms flail, 0..1.
+func _flail() -> float:
+	return _flail_k if _stumble else 0.0
+
+
+## Stumbling: the arms go out to the sides and against the way the body goes (a counterweight), swinging — catching the
+## balance. World rotations of the upper arms that override the pose target; the forearms keep the animated elbow.
+func _stumble_arm_targets() -> Dictionary:
+	var out := {}
+	var root := _root_name()
+	var k := _flail()
+	if root == "" or k <= 0.01:
+		return out
+	var hips := _bone_basis(root)
+	var fwd := Vector3(hips.z.x, 0.0, hips.z.z).normalized()
+	var away := _body_v.normalized() if _body_v.length() > 0.05 else Vector3.ZERO
+	for side: String in ["Left", "Right"]:
+		var ua := side + "UpperArm"
+		if not bones.has(ua):
+			continue
+		var sx := hips.x.normalized() * (1.0 if side == "Left" else -1.0)
+		var swing := sin(_stumble_t * 7.0 + (0.0 if side == "Left" else PI))
+		var d := (sx + Vector3.UP * 0.12 - away * 0.35 + fwd * swing * 0.45).normalized()
+		var cur := _bone_basis(ua)
+		out[ua] = cur.slerp(Basis(Quaternion(cur.y.normalized(), d)) * cur, k)
+	return out
+
+
+## A falling body protects itself (while _brace lasts): the arms reach for the ground the way it falls (in front,
+## behind, to the side — the arm on the far side comes across), the head keeps off the ground (chin to chest falling
+## backwards, face up falling forwards, tilted away falling sideways), the back rounds falling backwards so the back
+## lands before the head. World rotations of the bones that override the pose target.
 func _brace_targets() -> Dictionary:
 	var out := {}
 	var root := _root_name()
 	if root == "":
 		return out
-	var v := _root_velocity()
+	var k := _brace
 	var hips := _bone_basis(root)
+	var side_axis := hips.x.normalized()      # towards the body's left
 	var fwd := hips.z.normalized()
+	var v := _root_velocity()
 	var flat := Vector3(v.x, 0.0, v.z)
-	var dir := flat.normalized() if flat.length() > 0.3 else Vector3(fwd.x, 0.0, fwd.z).normalized()
-	var forwards := dir.dot(fwd) > -0.2
+	var dir: Vector3
+	if flat.length() > 0.3:
+		dir = flat.normalized()
+	else:
+		# hardly moving: the way the torso tips
+		var up := hips.y
+		var lean := Vector3(up.x, 0.0, up.z)
+		dir = lean.normalized() if lean.length() > 0.1 else Vector3(fwd.x, 0.0, fwd.z).normalized()
+	var f := dir.dot(fwd)                      # + falling forwards
+	var s := dir.dot(side_axis)                # + falling to the left
 	for side: String in ["Left", "Right"]:
 		var ua := side + "UpperArm"
 		var la := side + "LowerArm"
 		if not bones.has(ua):
 			continue
-		var sx := hips.x.normalized() * (1.0 if side == "Left" else -1.0)
+		var sx := side_axis * (1.0 if side == "Left" else -1.0)
+		var toward := dir.dot(sx)              # this arm is on the side the body falls to
 		var d: Vector3
-		if forwards:
+		if toward < -0.5:
+			# falling to the other side: this arm comes across in front
+			d = (fwd * 0.6 + dir * 0.4 + Vector3.DOWN * 0.3).normalized()
+		elif f > -0.3 or toward > 0.3:
+			# reach for the ground where the body goes
 			d = (dir * 0.75 + Vector3.DOWN * 0.7 + sx * 0.25).normalized()
 		else:
-			d = (fwd * 0.8 + Vector3.DOWN * 0.2 - sx * 0.35).normalized()   # across the chest
+			# backwards: reach back and down — the hands behind take the fall
+			d = (dir * 0.55 + Vector3.DOWN * 0.75 + sx * 0.45).normalized()
 		var cur := _bone_basis(ua)
-		var swing := Quaternion(cur.y.normalized(), d)
-		var want := Basis(swing) * cur
-		out[ua] = cur.slerp(want, _brace)
-		if bones.has(la) and forwards:
+		out[ua] = cur.slerp(Basis(Quaternion(cur.y.normalized(), d)) * cur, k)
+		if bones.has(la):
 			# forearm in line with the upper arm: the hand reaches the ground first (the elbow hinge limits the rest)
 			out[la] = out[ua]
-	if not forwards and bones.has("Head") and _parent.get("Head", "") != "":
-		# chin to chest
-		var par := _bone_basis(_parent["Head"])
-		out["Head"] = par * Basis(Vector3.RIGHT, 0.6)
+	if bones.has("Head") and _parent.get("Head", "") != "":
+		var tuck := clampf(-f, 0.0, 1.0) * 0.7    # chin to chest
+		var lift := clampf(f, 0.0, 1.0) * 0.45    # face up, off the ground
+		var tilt := s * 0.45                      # away from the ground
+		out["Head"] = Basis(side_axis, (tuck - lift) * k) * Basis(fwd, tilt * k) * _rel_target("Head")
+	if f < -0.2:
+		# backwards: round the back
+		for n: String in bones:
+			if _group[n] == "spine" and n != root:
+				out[n] = Basis(side_axis, 0.18 * -f * k) * _rel_target(n)
 	return out
+
+
+## The pose target of a bone as a world rotation, given where its physical parent is now.
+func _rel_target(n: String) -> Basis:
+	var p: String = _parent[n]
+	var sk_basis := skeleton.global_basis.orthonormalized()
+	var tp := sk_basis * _target(p).basis.orthonormalized()
+	var tc := sk_basis * _target(n).basis.orthonormalized()
+	return _bone_basis(p) * (tp.inverse() * tc)

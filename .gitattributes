@@ -3,3 +3,6 @@
 /docs export-ignore
 /README.md export-ignore
 /.gitattributes export-ignore
+/demo export-ignore
+/project.godot export-ignore
+/.gitignore export-ignore
