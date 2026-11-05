@@ -7,6 +7,10 @@ extends CharacterBody3D
 signal fell
 
 const MODEL := preload("res://demo/mannequin/mannequin.glb")
+## Getting up from the back (Quaternius UAL2 "LayToIdle", CC0), retargeted to the same humanoid bones.
+const GETUP := preload("res://demo/mannequin/getup.glb")
+## Getting up from face down — key poses: onto hands and knees, one knee, up (demo/getup_front.gd).
+const GetUpFront := preload("res://demo/getup_front.gd")
 ## Ground speed of the clips (m/s) — the character moves this fast when the clip plays at speed 1.
 const CLIP_SPEED := {"Walk": 1.15, "Jog_Fwd": 2.9}
 const WALK := 1.3
@@ -22,6 +26,8 @@ const MANNEQUIN_RADII := {
 @export var puppet := true
 ## Walks back and forth along its local X by this many metres (0 — stands).
 @export var patrol := 0.0
+## Knocked down alive: gets up by itself after lying hurt a while.
+@export var auto_get_up := true
 
 var ragdoll: ActiveRagdoll
 var skeleton: Skeleton3D
@@ -34,6 +40,7 @@ var running := false
 var down := false
 var dead := false
 var crawling := false
+var getting_up := false
 
 var _step_v := Vector3.ZERO
 var _patrol_origin := Vector3.ZERO
@@ -58,7 +65,18 @@ func _ready() -> void:
 	# down alive and lying still: hurt, it moves on the ground and holds the wound
 	ragdoll.settled.connect(func() -> void:
 		if down and not dead and not crawling:
-			ragdoll.writhe())
+			ragdoll.writhe()
+			# hurt a while, then up
+			get_tree().create_timer(ragdoll.writhe_time * 0.6, false).timeout.connect(func() -> void:
+				if auto_get_up and down and not dead and not crawling and ragdoll.writhing():
+					get_up()))
+	if not anim.has_animation("GetUp"):
+		var lib := anim.get_animation_library("")
+		var g := GETUP.instantiate()
+		var clip := (g.find_child("AnimationPlayer", true, false) as AnimationPlayer).get_animation("LayToIdle")
+		lib.add_animation("GetUp", clip)
+		g.free()
+		lib.add_animation("GetUpFront", GetUpFront.build(skeleton, anim.get_animation("Idle")))
 	crawl = ragdoll.add_crawl_modifier()
 	_patrol_origin = global_position
 	_play("Idle")
@@ -204,7 +222,41 @@ func _crawl_tick(delta: float) -> void:
 	move_and_slide()
 
 
-## Back on the feet where the body lies (no get-up clip in the demo — the pose snaps to idle).
+## Get up from where the body lies, physically: face down it first rolls onto its back, then the character is put
+## where the get-up clip starts on the lying body and puppet mode leads the body through the clip.
+func get_up() -> void:
+	if not down or getting_up:
+		return
+	if dead or crawling:
+		stand_up()
+		return
+	getting_up = true
+	# face down (or on a side): up onto hands and knees; on the back: up from the back (half on the back: roll onto
+	# it first)
+	var name := "GetUpFront" if ragdoll.lying_face_down() else "GetUp"
+	if name == "GetUp" and not ragdoll.lying_on_back():
+		ragdoll.roll_over()
+		while ragdoll.rolling():
+			await get_tree().physics_frame
+	var clip := anim.get_animation(name)
+	global_transform = ragdoll.get_up_transform(self, ActiveRagdoll.clip_pose(skeleton, clip, "Hips", 0.0))
+	velocity = Vector3.ZERO
+	_step_v = Vector3.ZERO
+	_clip = name
+	# the clip starts slow and speeds up — the lying body has to catch up with its first frame before it moves on
+	anim.speed_scale = 0.4
+	anim.play(name, 0.0)
+	anim.seek(0.0, true)
+	create_tween().tween_property(anim, "speed_scale", 1.0, 0.5).set_ease(Tween.EASE_IN)
+	ragdoll.get_up(clip.length + 0.35, 0.35)
+	await get_tree().create_timer(clip.length + 0.35, false).timeout
+	anim.speed_scale = 1.0
+	down = false
+	getting_up = false
+	_play("Idle")
+
+
+## Back on the feet where the body lies at once (dead or crawling — no get-up), the pose snaps to idle.
 func stand_up() -> void:
 	ragdoll.stop()
 	ragdoll.strength = 1.0
@@ -213,6 +265,7 @@ func stand_up() -> void:
 	down = false
 	dead = false
 	crawling = false
+	getting_up = false
 	velocity = Vector3.ZERO
 	_step_v = Vector3.ZERO
 	_clip = ""

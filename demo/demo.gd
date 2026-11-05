@@ -96,7 +96,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_R:
 				for c in characters:
 					if c.down:
-						c.stand_up()
+						c.get_up()
 			KEY_P:
 				_set_puppet(not puppet)
 			KEY_T:
@@ -320,7 +320,7 @@ func _build_ui() -> void:
 		toggles.add_child(cb)
 		cb.set_meta(&"toggle", t[0])
 	var help := Label.new()
-	help.text = "WASD walk, Shift run · RMB orbit, wheel zoom\nLMB use the tool on a body · Q throw a crate\nC crawl · R stand up · Backspace restart"
+	help.text = "WASD walk, Shift run · RMB orbit, wheel zoom\nLMB use the tool on a body · Q throw a crate\nC crawl · R get up · Backspace restart"
 	help.modulate = Color(1, 1, 1, 0.7)
 	box.add_child(help)
 	_status = Label.new()
@@ -348,6 +348,8 @@ func _update_status() -> void:
 		state = "dead"
 	elif c.crawling:
 		state = "crawling"
+	elif c.getting_up:
+		state = "getting up"
 	elif c.down:
 		state = "down"
 	elif ar.is_puppet():

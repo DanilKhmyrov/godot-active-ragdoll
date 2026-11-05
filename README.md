@@ -33,6 +33,9 @@ with its strings cut, you get:
 - **writhe** — `writhe()` once a body knocked down alive has settled: it moves like a hurt person (knees drawn up
   and let go, the back curling or arching, the head lifting — by how it lies: on the back, face down, on a side), a
   hand goes to the wound (the bone the last blow went into), and it calms down over `writhe_time`;
+- **get up** — from where the body lies, physically: `roll_over()` turns a body lying face down onto its back,
+  `get_up_transform()` puts the character where a get-up clip starts on the lying body, `get_up(duration)` lets
+  puppet mode lead the body through the clip (pins gain strength, balance is not judged meanwhile);
 - **crawl** — `CrawlModifier`: a procedural prone crawl (arms reach and pull in turns, legs drag,
   one can be limp); in puppet mode the physical body follows it and really touches the ground;
 - **no rubber stretching** — `BoneLengthGuard` keeps bone lengths on screen even when the
@@ -51,13 +54,15 @@ Enabling the plugin is optional: the classes are global (`class_name`).
 This repository is also a Godot project: open it (Godot 4.4+) and press F5. Four mannequins stand on a grey
 grid: you (WASD), one standing and one walking in puppet mode, one on plain animation (hit/stagger reactions).
 Click a body to use a tool on it — **Shot**, **Shove**, **Kill**, **Knock down** (1–4, power slider); Q throws a
-crate, C makes a body crawl, R stands everybody up, P toggles puppet mode, T slow motion, B shows the physical bodies.
+crate, C makes a body crawl, R gets everybody up (bodies knocked down alive lie hurt a while and get up by themselves), P toggles puppet mode, T slow motion, B shows the physical bodies.
 
-`demo/tools/demo_check.gd` runs every reaction headless and fails if a body lies or stands away from its physical
+`demo/tools/probe_*.gd` measure hits, knock-downs, stumbling, falls, lying, getting up and arm twist;
+`demo/tools/film_ground.gd` saves close-up frames of a body lying and getting up. `demo/tools/demo_check.gd` runs every reaction headless and fails if a body lies or stands away from its physical
 bones: `godot --headless --path . --script res://demo/tools/demo_check.gd`.
 
 The mannequin and its animations are [Quaternius' Universal Animation Library](https://quaternius.com/packs/universalanimationlibrary.html)
-(CC0). The demo is not part of the addon download (`export-ignore`).
+(CC0), the get-up from the back is "LayToIdle" from [Universal Animation Library 2](https://quaternius.com/packs/universalanimationlibrary2.html) (CC0); the get-up from face down (onto hands and knees, one knee, up) is built from key poses in
+`demo/getup_front.gd`. The demo is not part of the addon download (`export-ignore`).
 
 ## Quick start
 
@@ -139,13 +144,16 @@ the ragdoll started. Muscle tone per bone (`tone`, 0..1) is what behaviours anim
 | `release(how, dv)` | puppet → falling body ("die", "fall", "limp") |
 | `knock(bone, impulse, how, v)` | knocked over by a blow into `bone` (N·s) — topples from the hit point, any mode |
 | `writhe(wound)`, `writhing()` | hurt on the ground: moves and holds the wound (call on `settled`) |
+| `lying_on_back()`, `lying_face_down()`, `roll_over()`, `rolling()` | how it lies; roll_over() turns a body onto its back |
+| `get_up_transform(character, clip_hips)`, `static clip_pose(skeleton, anim, bone, t)` | where to put the character so the get-up clip starts on the lying body |
+| `get_up(duration, blend)` | play the clip, then this: the lying body is led through it in puppet mode |
 | `stop()` | stop simulating (before a get-up animation) |
 | `is_running()`, `hitting()`, `hips_speed()` | state |
 | signal `settled` | the body has come to rest |
 | signals `balance_lost`, `recovered` | stagger outcome |
 
 Exports: `pin_rate`, `pin_weights`, `foot_pin`, `root_pin`, `recover_rate`, `balance_max_drift`, `balance_max_drop`, `balance_max_speed`, `stumble_min_speed`, `stumble_catch_speed`, `stumble_step_speed`, `stumble_brake`, `stumble_max_drift`, `stumble_time`, `hit_share`, `spine_brace`, `self_collision`, `frequency`, `damping_ratio`, `max_angular_step`, `collision_layer`, `collision_mask`,
-`settle_speed`, `hit_stiffness`, `hit_release`, `brace_stiffness`, `writhe_time`, `writhe_tone`, `stagger_tone`, `stagger_max_lean`,
+`settle_speed`, `hit_stiffness`, `hit_release`, `brace_stiffness`, `max_arm_twist`, `writhe_time`, `writhe_tone`, `stagger_tone`, `stagger_max_lean`,
 `stagger_gain`, `stagger_time`, `stagger_power` (how much harder than physics a blow sways — 1 is physical).
 
 `RagdollProfile` (Resource): `bones` — `{bone name: {to, radius, mass, joint, limits, group, hang}}` (`hang` — centre

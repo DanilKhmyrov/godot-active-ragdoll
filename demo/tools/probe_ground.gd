@@ -33,6 +33,7 @@ func _run() -> void:
 			await physics_frame
 		var c := demo.get_node("Standing") as CharacterBody3D
 		var ar: ActiveRagdoll = c.ragdoll
+		c.auto_get_up = false
 		c.knock_down(spec[0], (spec[1] as Vector3).normalized() * float(spec[2]))
 		var wound := ar.bones[String(spec[0])] as PhysicalBone3D
 		for i in 150:
