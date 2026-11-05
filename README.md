@@ -30,6 +30,9 @@ with its strings cut, you get:
   it — `recovered`, didn't — `balance_lost` (knock the body over);
 - **self-collision** — limbs collide with each other and with the torso (no arm through the chest),
   neighbours on the chain and parts overlapping at the start pose are excepted automatically;
+- **writhe** — `writhe()` once a body knocked down alive has settled: it moves like a hurt person (knees drawn up
+  and let go, the back curling or arching, the head lifting — by how it lies: on the back, face down, on a side), a
+  hand goes to the wound (the bone the last blow went into), and it calms down over `writhe_time`;
 - **crawl** — `CrawlModifier`: a procedural prone crawl (arms reach and pull in turns, legs drag,
   one can be limp); in puppet mode the physical body follows it and really touches the ground;
 - **no rubber stretching** — `BoneLengthGuard` keeps bone lengths on screen even when the
@@ -135,13 +138,14 @@ the ragdoll started. Muscle tone per bone (`tone`, 0..1) is what behaviours anim
 | `stumbling()`, `stumble_velocity()` | after a hard blow the body goes with it — move the character at this velocity (walk/run animation) so the feet step under it; `recovered` or `balance_lost` |
 | `release(how, dv)` | puppet → falling body ("die", "fall", "limp") |
 | `knock(bone, impulse, how, v)` | knocked over by a blow into `bone` (N·s) — topples from the hit point, any mode |
+| `writhe(wound)`, `writhing()` | hurt on the ground: moves and holds the wound (call on `settled`) |
 | `stop()` | stop simulating (before a get-up animation) |
 | `is_running()`, `hitting()`, `hips_speed()` | state |
 | signal `settled` | the body has come to rest |
 | signals `balance_lost`, `recovered` | stagger outcome |
 
 Exports: `pin_rate`, `pin_weights`, `foot_pin`, `root_pin`, `recover_rate`, `balance_max_drift`, `balance_max_drop`, `balance_max_speed`, `stumble_min_speed`, `stumble_catch_speed`, `stumble_step_speed`, `stumble_brake`, `stumble_max_drift`, `stumble_time`, `hit_share`, `spine_brace`, `self_collision`, `frequency`, `damping_ratio`, `max_angular_step`, `collision_layer`, `collision_mask`,
-`settle_speed`, `hit_stiffness`, `hit_release`, `brace_stiffness`, `stagger_tone`, `stagger_max_lean`,
+`settle_speed`, `hit_stiffness`, `hit_release`, `brace_stiffness`, `writhe_time`, `writhe_tone`, `stagger_tone`, `stagger_max_lean`,
 `stagger_gain`, `stagger_time`, `stagger_power` (how much harder than physics a blow sways — 1 is physical).
 
 `RagdollProfile` (Resource): `bones` — `{bone name: {to, radius, mass, joint, limits, group, hang}}` (`hang` — centre

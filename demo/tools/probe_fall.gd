@@ -3,7 +3,7 @@ extends SceneTree
 ##   godot --headless --path . --script res://demo/tools/probe_fall.gd   (CASE=name for one)
 ## hands — when the first hand touched the ground (s), head — when the head did and how fast it was going (m/s),
 ## knees — most a knee bent while falling (°), curl — most the spine curled over the hips (°), lands — on what
-## (back / front / side, by where the chest faces at the end).
+## (back / front / side, by where the pelvis faces at the end).
 
 const CASES := {
 	"forwards": [&"UpperChest", Vector3(0, 0.1, 1), 110.0],
@@ -60,8 +60,8 @@ func _run() -> void:
 			if head_t < 0.0 and ar.is_running():
 				knees = maxf(knees, maxf(_angle(ar, "LeftUpperLeg", "LeftLowerLeg"), _angle(ar, "RightUpperLeg", "RightLowerLeg")) - knee0)
 				curl = maxf(curl, _angle(ar, "Hips", "UpperChest") - curl0)
-		var chest := ar._bone_basis("UpperChest")
-		var faces := chest.z.normalized().y
+		# by the pelvis — the chest also turns when the back curls
+		var faces := ar._bone_basis("Hips").z.normalized().y
 		var lands := "back" if faces > 0.5 else ("front" if faces < -0.5 else "side")
 		print("FALL %-9s hands %s  head %s  knees %3.0f°  curl %3.0f°  lands on %s" % [name,
 			("%.2fs" % hand_t) if hand_t >= 0.0 else "never", ("%.2fs at %.1f m/s" % [head_t, head_v]) if head_t >= 0.0 else "never", knees, curl, lands])

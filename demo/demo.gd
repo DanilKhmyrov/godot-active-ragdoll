@@ -358,5 +358,7 @@ func _update_status() -> void:
 		state += ", stumbling"
 	if ar.hitting():
 		state += ", hit"
+	if ar.writhing():
+		state += ", writhing"
 	_status.text = "%s: %s\ndrift %.2f m  drop %.2f m  hips %.1f m/s\n%d FPS" % [
 		c.name, state, ar.drift().length(), ar.drop(), ar.hips_speed(), Engine.get_frames_per_second()]

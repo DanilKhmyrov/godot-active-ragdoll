@@ -72,6 +72,10 @@ signal recovered
 @export var stagger_time := 1.6
 ## fall(): how much faster than usual the protecting muscles (arms reaching for the ground, the neck) move — a reflex.
 @export var brace_stiffness := 2.5
+## writhe(): how long a hurt body on the ground keeps moving before it calms down, s.
+@export var writhe_time := 8.0
+## writhe(): muscle tone of the moving body (the arm holding the wound is firmer).
+@export var writhe_tone := 0.6
 ## Puppet: how fast pins pull a body back to its animated place, 1/s per metre of error.
 @export var pin_rate := 14.0
 ## Puppet: pin weight per group (0 — free, 1 — follows the animation exactly).
@@ -169,6 +173,11 @@ var _support_h := 1.0       # stumbling: how well the feet are under the body, 0
 var _step_v := Vector3.ZERO # stumbling: where the feet should go, m/s (world, horizontal)
 var _body_v := Vector3.ZERO # stumbling: how fast the body goes (world, horizontal) — the blow, braked by the steps
 var _trip_at := -1.0        # stumbling: when a too fast body trips over its feet
+var _writhe := false
+var _writhe_t := 0.0
+var _friction := {}         # writhe(): the limbs' friction before it
+var _lie_face := Vector3.ZERO  # writhe(): where the pelvis faced when it started (the roll it keeps)
+var _wound := ""           # last bone a blow went into (writhe(): a hand holds it)
 var _flail_k := 0.0         # stumbling: how hard the arms flail, 0..1 — rises with the blow, fades slower than it
 var _com_prev := Vector3.INF
 var _com_v := Vector3.ZERO  # centre of mass velocity, physical (world)
@@ -379,6 +388,7 @@ func _descends(k: String, ancestor: String) -> bool:
 ## v — velocity of the root (hips), world, absolute (include the character's own movement); every other bone adds
 ## how it moved relative to the root in the animation. spin — extra angular velocity of every bone.
 func start(v := Vector3.ZERO, spin := Vector3.ZERO, exceptions: Array = [], exception_time := 1.0) -> void:
+	_end_writhe()
 	_stop_partial()
 	_snapshot_pose()
 	var fresh := _pose_now.size() == bones.size() and (Time.get_ticks_usec() - _pose_t) < 200000
@@ -585,6 +595,7 @@ func puppet(on: bool, keep_physics := false) -> void:
 		return
 	_stop_partial()
 	_stagger = false
+	_end_writhe()
 	if not (keep_physics and _running):
 		start()
 	_running = true
@@ -727,6 +738,7 @@ func puppet_hit(bone_name: StringName, impulse: Vector3, unpin := 0.95, balance 
 ## legs under a struck chest): they only follow through the joints — the body topples from the blow instead of
 ## flying off as one block.
 func _blow(b: String, impulse: Vector3, share := -1.0) -> void:
+	_wound = b
 	var chain: Array[PhysicalBone3D] = []
 	var c := b
 	while c != "" and bones.has(c):
@@ -974,6 +986,7 @@ func stumble_velocity() -> Vector3:
 
 ## Stop simulating (the caller takes the body back, e.g. a get-up animation).
 func stop() -> void:
+	_end_writhe()
 	_puppet = false
 	_stop_partial()
 	if _running:
@@ -1139,7 +1152,26 @@ func _physics_process(delta: float) -> void:
 		_puppet_tick(delta)
 	else:
 		_update_tone()
-	var overrides := _brace_targets() if _brace > 0.0 else (_stumble_arm_targets() if stumbling() else {})
+	var overrides := {}
+	if _brace > 0.0:
+		overrides = _brace_targets()
+	elif stumbling():
+		overrides = _stumble_arm_targets()
+	elif _writhe:
+		overrides = _writhe_targets(delta)
+		# the limbs and the head are lifted by their own muscles (velocity motors alone cannot hold a 9 kg thigh up
+		# against gravity); the trunk lies heavy
+		var lift := 0.75 * _writhe_strength()
+		var g: Vector3 = ProjectSettings.get_setting("physics/3d/default_gravity", 9.8) \
+			* ProjectSettings.get_setting("physics/3d/default_gravity_vector", Vector3.DOWN)
+		_hold_wound()
+		_keep_lying(delta)
+		for n: String in bones:
+			var pb := bones[n] as PhysicalBone3D
+			# a body that lay still has been put to sleep — the muscles' velocities would not reach it
+			PhysicsServer3D.body_set_state(pb.get_rid(), PhysicsServer3D.BODY_STATE_SLEEPING, false)
+			if _group[n] != "spine":
+				pb.linear_velocity -= g * pb.gravity_scale * delta * lift
 	var err_sum := 0.0
 	var count := 0
 	var sk_basis := skeleton.global_basis.orthonormalized()
@@ -1208,6 +1240,16 @@ func _physics_process(delta: float) -> void:
 
 
 func _update_tone() -> void:
+	if _writhe and _brace <= 0.0:
+		# hurt and moving: low tone (the body lies heavy), fading as it calms down; the arm on the wound firmer
+		var k := _writhe_strength()
+		var hold := _holding_arm()
+		for n: String in bones:
+			var t := writhe_tone * k
+			if hold != "" and n.begins_with(hold) and _group[n] == "arms":
+				t = 0.15                     # the hand is led to the wound (_hold_wound), the arm only follows
+			tone[n] = t
+		return
 	for g: String in _fades:
 		var f: Array = _fades[g]
 		var k := clampf((_t - float(f[1])) / maxf(float(f[2]), 0.01), 0.0, 1.0)
@@ -1278,6 +1320,164 @@ func _stumble_arm_targets() -> Dictionary:
 	return out
 
 
+## Hurt, on the ground: the body moves like a hurt person — knees drawn up and let go, the back arching and curling,
+## the head lifted, rolling a little — and a hand holds the wound (the bone the last blow went into; another arm when
+## the wound is an arm). Call when the body has settled (signal settled); it calms down over writhe_time. The pose it
+## lies in is the base — the body moves around it, it does not try to stand. stop() / puppet() end it.
+func writhe(wound := &"") -> void:
+	if not _running or _puppet:
+		return
+	if wound != &"":
+		_wound = String(wound)
+	# the lying pose is the target the movement goes around
+	_snapshot.clear()
+	var inv := skeleton.global_transform.affine_inverse()
+	for n: String in bones:
+		var pb := bones[n] as PhysicalBone3D
+		var xf := inv * pb.global_transform * pb.body_offset.affine_inverse()
+		xf.basis = xf.basis.orthonormalized()
+		_snapshot[_idx[n]] = xf
+	_live = false
+	_fades.clear()
+	_brace = 0.0
+	# heels and elbows slide over the ground (a lying limb with full friction is glued to it — the muscles cannot move
+	# it); the trunk keeps its grip, the body does not skate
+	if not _writhe:
+		_friction.clear()
+		for n: String in bones:
+			if _group[n] != "spine":
+				var pb := bones[n] as PhysicalBone3D
+				_friction[n] = pb.friction
+				pb.friction = minf(pb.friction, 0.3)
+	_writhe = true
+	_writhe_t = 0.0
+	_lie_face = _bone_basis(_root_name()).z.normalized() if _root_name() != "" else Vector3.ZERO
+	set_physics_process(true)
+
+
+func _end_writhe() -> void:
+	if _writhe:
+		for n: String in _friction:
+			(bones[n] as PhysicalBone3D).friction = _friction[n]
+		_friction.clear()
+	_writhe = false
+
+
+func writhing() -> bool:
+	return _writhe and _running and not _puppet
+
+
+## writhe(): how much it still moves, 1 → 0 over writhe_time (eased).
+func _writhe_strength() -> float:
+	var k := clampf(1.0 - _writhe_t / maxf(writhe_time, 0.1), 0.0, 1.0)
+	return k * k * (3.0 - 2.0 * k)
+
+
+## writhe(): "Left"/"Right" — the arm that holds the wound ("" — none).
+func _holding_arm() -> String:
+	if _wound == "" or not bones.has(_wound):
+		return ""
+	if _group[_wound] == "arms":
+		return "Right" if _wound.begins_with("Left") else "Left"
+	# the free arm — the one higher up, not the one the body lies on — the nearer one if both are free
+	var at := (bones[_wound] as PhysicalBone3D).global_position
+	var best := ""
+	var best_score := INF
+	for side: String in ["Left", "Right"]:
+		var ua := side + "UpperArm"
+		if bones.has(ua):
+			var p := (bones[ua] as PhysicalBone3D).global_position
+			var score := p.distance_to(at) - p.y * 3.0
+			if score < best_score:
+				best_score = score
+				best = side
+	return best
+
+
+## writhe(): the hand is led onto the wound — its side nearer the arm, off the ground — like a pin: the palm end of the
+## forearm pulled there, the joints find how the arm bends (a pose target cannot know what the elbow hinge and the
+## shoulder allow).
+func _hold_wound() -> void:
+	var hold := _holding_arm()
+	var la := hold + "LowerArm"
+	if hold == "" or not bones.has(la) or not bones.has(_wound):
+		return
+	var wb := bones[_wound] as PhysicalBone3D
+	# on the wound's side nearer this arm and up — an arm reaching over the top of a round trunk would roll it over
+	var sh := (bones[hold + "UpperArm"] as PhysicalBone3D).global_position
+	var toward := sh - wb.global_position
+	toward = Vector3(toward.x, 0.0, toward.z).normalized()
+	var target := wb.global_position + (Vector3.UP * 0.6 + toward * 0.8).normalized() * (float(wb.get_meta(&"ragdoll_radius", 0.08)) + 0.04)
+	var pb := bones[la] as PhysicalBone3D
+	var palm := pb.global_transform * Vector3(0, 0, -float(pb.get_meta(&"ragdoll_length", 0.25)) * 0.5 - 0.06)
+	var want := ((target - palm) * 4.0).limit_length(0.9)
+	pb.linear_velocity = pb.linear_velocity.lerp(want, 0.2 * minf(_writhe_strength() * 2.0, 1.0))
+
+
+## writhe(): a flat back (or front) does not roll over — the round capsules of the trunk would at every asymmetric
+## push. The trunk is turned back about its long axis towards how it lay down.
+func _keep_lying(delta: float) -> void:
+	var root := _root_name()
+	if _lie_face == Vector3.ZERO or root == "":
+		return
+	# by the pelvis: the chest also turns when the back curls, which is not a roll
+	var axis := _bone_basis(root).y.normalized()
+	var a := _bone_basis(root).z.normalized()
+	var b := _lie_face
+	a = (a - axis * a.dot(axis)).normalized()
+	b = (b - axis * b.dot(axis)).normalized()
+	var err := atan2(axis.dot(a.cross(b)), a.dot(b))
+	for n: String in bones:
+		if n == root or _group[n] == "spine":
+			var pb := bones[n] as PhysicalBone3D
+			var spin := pb.angular_velocity.dot(axis)
+			pb.angular_velocity += axis * (err * 4.0 - spin) * clampf(10.0 * delta, 0.0, 0.5)
+
+
+## writhe(): world rotations of the bones that override the lying pose.
+func _writhe_targets(delta: float) -> Dictionary:
+	_writhe_t += delta
+	var out := {}
+	var root := _root_name()
+	var k := _writhe_strength()
+	if root == "" or k <= 0.001:
+		return out
+	var t := _writhe_t
+	var hips := _bone_basis(root)
+	var side_axis := hips.x.normalized()
+	var fwd := hips.z.normalized()
+	# how it lies: on the back the knees come up to the chest and the chin down; face down a knee cannot come forward
+	# (it would go into the ground) — the shins lift, the head comes up, the back arches; on a side it curls up
+	var up := fwd.dot(Vector3.UP)
+	var on_back := clampf(up * 2.0, 0.0, 1.0)
+	var on_front := clampf(-up * 2.0, 0.0, 1.0)
+	# legs: knees drawn up and let go in turns, slowly
+	for side: String in ["Left", "Right"]:
+		var ul := side + "UpperLeg"
+		var ll := side + "LowerLeg"
+		var ph := t * 1.3 + (0.0 if side == "Left" else 2.2)
+		var draw := (0.5 + 0.5 * sin(ph)) * k          # 0 — as it lies, 1 — knee up
+		# angles from the rest pose (straight leg), not added to how it lies — limp legs land folded near the knee's
+		# limit, more bend on top of that could never be reached
+		if bones.has(ul):
+			out[ul] = _rel_rest(ul).slerp(Basis(side_axis, -(0.15 + 1.0 * draw) * (1.0 - on_front)) * _rel_rest(ul), k)
+		if bones.has(ll):
+			# face down the shins only swing up a little (straight up they would look like a scorpion's tail)
+			var bend := lerpf(0.3 + 1.3 * draw, 0.25 + 0.7 * draw, on_front)
+			out[ll] = _rel_rest(ll).slerp(Basis(side_axis, bend) * _rel_rest(ll), k)
+	# back curling (on the back, on a side) or arching (face down), a roll to one side and back
+	var curl := (sin(t * 0.9) * 0.12 + 0.1 * (1.0 - on_front) - 0.15 * on_front) * k
+	var roll := sin(t * 0.55) * 0.15 * k
+	for n: String in bones:
+		if _group[n] == "spine" and n != root:
+			out[n] = Basis(fwd, roll * 0.5) * Basis(side_axis, curl) * _rel_rest(n)
+	# the head comes off the ground now and then: chin to chest on the back, face up face down
+	if bones.has("Head") and _parent.get("Head", "") != "":
+		var lift := (0.35 + 0.25 * sin(t * 0.7 + 1.0)) * k * (1.0 - 2.0 * on_front)
+		out["Head"] = Basis(side_axis, lift) * _rel_rest("Head")
+	return out
+
+
 ## A falling body protects itself (while _brace lasts): the arms reach for the ground the way it falls (in front,
 ## behind, to the side — the arm on the far side comes across), the head keeps off the ground (chin to chest falling
 ## backwards, face up falling forwards, tilted away falling sideways), the back rounds falling backwards so the back
@@ -1336,6 +1536,15 @@ func _brace_targets() -> Dictionary:
 			if _group[n] == "spine" and n != root:
 				out[n] = Basis(side_axis, 0.18 * -f * k) * _rel_target(n)
 	return out
+
+
+## The rest pose of a bone relative to its physical parent, as a world rotation given where the parent is now.
+func _rel_rest(n: String) -> Basis:
+	var p: String = _parent[n]
+	var sk_basis := skeleton.global_basis.orthonormalized()
+	var tp := sk_basis * skeleton.get_bone_global_rest(_idx[p]).basis.orthonormalized()
+	var tc := sk_basis * skeleton.get_bone_global_rest(_idx[n]).basis.orthonormalized()
+	return _bone_basis(p) * (tp.inverse() * tc)
 
 
 ## The pose target of a bone as a world rotation, given where its physical parent is now.

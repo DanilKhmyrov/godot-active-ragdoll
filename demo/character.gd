@@ -55,6 +55,10 @@ func _ready() -> void:
 	ragdoll.collision_layer = 1 << 9      # the ragdoll layer: not in its own mask, self_collision adds it back
 	ragdoll.collision_mask = 1            # the world
 	ragdoll.balance_lost.connect(_on_balance_lost)
+	# down alive and lying still: hurt, it moves on the ground and holds the wound
+	ragdoll.settled.connect(func() -> void:
+		if down and not dead and not crawling:
+			ragdoll.writhe())
 	crawl = ragdoll.add_crawl_modifier()
 	_patrol_origin = global_position
 	_play("Idle")
@@ -130,6 +134,9 @@ func shoot(bone: StringName, impulse: Vector3) -> void:
 		ragdoll.puppet_hit(bone, impulse)
 	elif not ragdoll.is_running():
 		ragdoll.hit(bone, impulse)
+	else:
+		# lying: the blow lands where it hit (and a writhing body holds the new wound)
+		ragdoll.knock(bone, impulse)
 
 
 ## A shove that may knock the body over: puppet — a blow to the balance (the body staggers; a hard one — over 1.3 m/s
