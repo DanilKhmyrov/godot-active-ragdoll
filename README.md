@@ -1,6 +1,6 @@
 # Active Ragdoll for Godot 4
 
-![Hits, a shove, a knock-down, a kicked leg](docs/demo.gif)
+![Hits, a shove, a knock-down, a kicked leg](docs/reactions.gif)
 
 Active ragdolls for humanoid `Skeleton3D`s. Physical bones are driven by muscles towards the animated pose, so
 bodies react to hits, stumble, fall, lie on the ground and get up instead of just going limp.
